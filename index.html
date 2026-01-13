@@ -188,7 +188,7 @@
             // 高空 (20000km) -> Ratio ~3 -> Speed ~10
             // 低空 (100m) -> Ratio ~1.5e-5 -> Speed ~Tiny
             // 这样保证了地面移动距离与手指移动距离大致成正比
-            return CONFIG.ROTATE_SPEED * (height * 0.8 / EARTH_RADIUS);
+            return CONFIG.ROTATE_SPEED * (height * 0.6 / EARTH_RADIUS);
         }
 
         // ==========================================================================================
@@ -213,142 +213,142 @@
         // Smooth State
         let smoothX = 0, smoothY = 0;
 
+        // Reset state helper
+        function resetState(statusText) {
+            isPinching = false;
+            lastHandPos = null;
+            lastPinchDist = null;
+            uiMode.innerText = statusText;
+            uiMode.className = "";
+        }
+
+        // Single Hand Rotation Logic
+        function handleRotation(hand) {
+            isPinching = true;
+            uiMode.innerText = "GRABBING (PAN)";
+            uiMode.className = "highlight";
+
+            const thumb = hand[4];
+            const index = hand[8];
+            const cx = (thumb.x + index.x) / 2;
+            const cy = (thumb.y + index.y) / 2;
+
+            // Smooth State Initialization
+            if (lastHandPos === null) {
+                smoothX = cx; smoothY = cy;
+            } else {
+                smoothX = smoothX * (1 - CONFIG.SMOOTHING) + cx * CONFIG.SMOOTHING;
+                smoothY = smoothY * (1 - CONFIG.SMOOTHING) + cy * CONFIG.SMOOTHING;
+            }
+
+            if (lastHandPos) {
+                const deltaX = smoothX - lastHandPos.x;
+                const deltaY = smoothY - lastHandPos.y;
+
+                if (Math.hypot(deltaX, deltaY) > 0.001) {
+                    const sensitivity = getDynamicSensitivity();
+
+                    // X-axis: Earth rotates L/R -> Camera rotates R/L
+                    const rotateX = Math.abs(deltaX) * sensitivity;
+                    if (deltaX > 0) viewer.camera.rotateLeft(rotateX);
+                    else viewer.camera.rotateRight(rotateX);
+
+                    // Y-axis: Earth rotates Up/Down -> Camera rotates Down/Up
+                    const rotateY = Math.abs(deltaY) * sensitivity;
+                    if (deltaY > 0) viewer.camera.rotateDown(rotateY);
+                    else viewer.camera.rotateUp(rotateY);
+                }
+            }
+
+            lastHandPos = { x: smoothX, y: smoothY };
+            lastPinchDist = null; // Reset zoom state
+        }
+
+        // Dual Hand Zoom Logic
+        function handleZoom(h1, h2) {
+            uiMode.innerText = "ZOOMING (DUAL PINCH)";
+            uiMode.className = "highlight";
+            isPinching = true;
+            lastHandPos = null; // Reset rotation state
+
+            // Calculate distance between centers of hands (using index 9: Middle Finger MCP)
+            const c1 = h1[9];
+            const c2 = h2[9];
+            const currDist = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+
+            if (lastPinchDist) {
+                const delta = currDist - lastPinchDist;
+
+                if (Math.abs(delta) > 0.002) {
+                    const zoomAmount = delta * viewer.camera.positionCartographic.height * CONFIG.ZOOM_SPEED;
+
+                    if (delta > 0) {
+                        viewer.camera.zoomIn(zoomAmount);
+                    } else {
+                        viewer.camera.zoomOut(Math.abs(zoomAmount));
+                    }
+                }
+            }
+            lastPinchDist = currDist;
+        }
+
         function onResults(results) {
             uiLoad.style.display = 'none';
             uiSys.innerText = "ONLINE";
 
-            // 更新高度显示
+            // Update Altitude
             const height = viewer.camera.positionCartographic.height;
             uiAlt.innerText = Math.round(height) + " m";
 
-            // 准备画布
+            // Prepare Canvas
             canvasElement.width = videoElement.videoWidth;
             canvasElement.height = videoElement.videoHeight;
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
 
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hands = results.multiHandLandmarks;
 
-                // 绘制骨骼
-                for (const landmarks of results.multiHandLandmarks) {
-                    // 简单判断该手是否捏合来决定颜色
+                // Draw Skeletons
+                for (const landmarks of hands) {
                     const dist = calculatePinchDist(landmarks);
                     const color = (dist < CONFIG.PINCH_THRESHOLD) ? '#FF0055' : '#00FFFF';
                     drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, { color: color, lineWidth: 2 });
                     drawLandmarks(canvasCtx, landmarks, { color: '#FFFFFF', lineWidth: 1, radius: 3 });
                 }
 
-                const hands = results.multiHandLandmarks;
+                // ---------------------------------------------------------
+                // Interaction Logic
+                // ---------------------------------------------------------
 
-                // --- 逻辑分支 ---
-
-                if (hands.length === 1) {
-                    // [ 单手模式：平移 ]
-                    const hand = hands[0];
-                    const pinchDist = calculatePinchDist(hand);
-
-                    if (pinchDist < CONFIG.PINCH_THRESHOLD) {
-                        isPinching = true;
-                        uiMode.innerText = "GRABBING (PAN)";
-                        uiMode.className = "highlight";
-
-                        // 捏合中心点
-                        const thumb = hand[4];
-                        const index = hand[8];
-                        const cx = (thumb.x + index.x) / 2;
-                        const cy = (thumb.y + index.y) / 2;
-
-                        // 平滑处理
-                        if (lastHandPos === null) {
-                            smoothX = cx; smoothY = cy;
-                        } else {
-                            smoothX = smoothX * (1 - CONFIG.SMOOTHING) + cx * CONFIG.SMOOTHING;
-                            smoothY = smoothY * (1 - CONFIG.SMOOTHING) + cy * CONFIG.SMOOTHING;
-                        }
-
-                        if (lastHandPos) {
-                            // 计算位移
-                            const deltaX = smoothX - lastHandPos.x;
-                            const deltaY = smoothY - lastHandPos.y;
-
-                            if (Math.hypot(deltaX, deltaY) > 0.001) {
-                                const sensitivity = getDynamicSensitivity();
-
-                                // 强制锁定球心，确保旋转是 Orbit 而不是 Yaw
-                                // 这解决了“无法旋转出画面边界”（原地打转）的问题
-                                // viewer.camera.lookAt(Cesium.Cartesian3.ZERO, viewer.camera.positionWC);
-
-                                // X轴移动 (左右拖动地球)
-                                // 手向右 (deltaX > 0) -> 地球向右转 -> 相机向左转 (rotateLeft)
-                                const rotateX = Math.abs(deltaX) * sensitivity;
-                                if (deltaX > 0) viewer.camera.rotateLeft(rotateX);
-                                else viewer.camera.rotateRight(rotateX);
-
-                                // Y轴移动 (上下拖动地球)
-                                // 手向下 (deltaY > 0) -> 地球向下转 -> 相机向上转 (rotateUp) -> 用户反馈反了 -> 改为 rotateDown
-                                const rotateY = Math.abs(deltaY) * sensitivity;
-                                if (deltaY > 0) viewer.camera.rotateDown(rotateY);
-                                else viewer.camera.rotateUp(rotateY);
-                            }
-                        }
-
-                        lastHandPos = { x: smoothX, y: smoothY };
-
-                    } else {
-                        // 松开手
-                        isPinching = false;
-                        lastHandPos = null;
-                        uiMode.innerText = "HOVERING";
-                        uiMode.className = "";
+                // Filter hands that are pinching
+                let pinchingHands = [];
+                for (const h of hands) {
+                    if (calculatePinchDist(h) < CONFIG.PINCH_THRESHOLD) {
+                        pinchingHands.push(h);
                     }
-                    lastPinchDist = null;
+                }
 
-                } else if (hands.length === 2) {
-                    // [ 双手模式：缩放 ]
-                    // 必须双手都捏合才触发
-                    const h1 = hands[0];
-                    const h2 = hands[1];
-                    const p1 = calculatePinchDist(h1);
-                    const p2 = calculatePinchDist(h2);
+                if (pinchingHands.length >= 2) {
+                    // Case: At least 2 hands pinching -> ZOOM
+                    handleZoom(pinchingHands[0], pinchingHands[1]);
 
-                    if (p1 < CONFIG.PINCH_THRESHOLD && p2 < CONFIG.PINCH_THRESHOLD) {
-                        uiMode.innerText = "ZOOMING (DUAL PINCH)";
-                        uiMode.className = "highlight";
-                        isPinching = true;
+                } else if (pinchingHands.length === 1) {
+                    // Case: Exactly 1 hand pinching -> ROTATE (Move)
+                    // This works whether there is 1 hand total or 2 hands total
+                    handleRotation(pinchingHands[0]);
 
-                        // 计算两只手中心点的距离
-                        const c1 = h1[9];
-                        const c2 = h2[9];
-                        const currDist = Math.hypot(c1.x - c2.x, c1.y - c2.y);
-
-                        if (lastPinchDist) {
-                            const delta = currDist - lastPinchDist;
-
-                            if (Math.abs(delta) > 0.002) {
-                                const zoomAmount = delta * viewer.camera.positionCartographic.height * CONFIG.ZOOM_SPEED;
-
-                                if (delta > 0) {
-                                    viewer.camera.zoomIn(zoomAmount);
-                                } else {
-                                    viewer.camera.zoomOut(Math.abs(zoomAmount));
-                                }
-                            }
-                        }
-                        lastPinchDist = currDist;
+                } else {
+                    // Case: No hands pinching
+                    if (hands.length >= 2) {
+                        resetState("WAITING (2 HANDS)");
                     } else {
-                        uiMode.innerText = "WAITING FOR DUAL PINCH";
-                        uiMode.className = "";
-                        lastPinchDist = null;
+                        resetState("HOVERING");
                     }
-                    lastHandPos = null;
                 }
 
             } else {
-                // 没有手
-                uiMode.innerText = "IDLE";
-                uiMode.className = "";
-                isPinching = false;
-                lastHandPos = null;
-                lastPinchDist = null;
+                // No hands detected
+                resetState("IDLE");
             }
         }
 
