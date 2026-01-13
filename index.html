@@ -6,8 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Holo Earth</title>
 
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Cesium.js"></script>
-    <link href="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
@@ -74,6 +74,45 @@
             font-weight: bold;
         }
 
+        /* Center Crosshair */
+        #center-crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+            z-index: 50;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        #center-crosshair::before,
+        #center-crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(0, 255, 255, 0.6);
+            /* Cyan semi-transparent */
+            border-radius: 2px;
+        }
+
+        /* Horizontal line */
+        #center-crosshair::before {
+            top: 9px;
+            left: 0;
+            width: 100%;
+            height: 2px;
+        }
+
+        /* Vertical line */
+        #center-crosshair::after {
+            top: 0;
+            left: 9px;
+            width: 2px;
+            height: 100%;
+        }
+
         #loading {
             position: absolute;
             top: 50%;
@@ -102,6 +141,8 @@
     <video class="input_video"></video>
     <canvas id="output_canvas"></canvas>
     <div id="cesiumContainer"></div>
+    <!-- Crosshair Element -->
+    <div id="center-crosshair"></div>
 
     <div id="hud-status">
         <div class="status-line">SYSTEM: <span id="sys-status">INITIALIZING...</span></div>
@@ -168,9 +209,9 @@
             }
         });
 
-        // 加载 Google 3D Tiles
+        // 加载 Google 3D Tiles & 叠加道路 (Cesium 1.130+)
         async function loadTileset() {
-            if (GOOGLE_MAPS_API_KEY === 'YOUR_GOOGLE_KEY_HERE') {
+            if (!GOOGLE_MAPS_API_KEY == 'YOUR_GOOGLE_KEY') {
                 alert("请在代码中填入 Google Maps API Key 才能显示真实城市模型！");
                 return;
             }
@@ -178,6 +219,12 @@
                 Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY;
                 const tileset = await Cesium.createGooglePhotorealistic3DTileset();
                 viewer.scene.primitives.add(tileset);
+
+                // 🌟 叠加道路层 (Hybrid)
+                // 使用 Bing Maps AerialWithLabels (Asset ID 3) 覆盖在 3D Tiles 上
+                const roadLayer = await Cesium.IonImageryProvider.fromAssetId(3);
+                tileset.imageryLayers.addImageryProvider(roadLayer);
+
             } catch (e) {
                 console.error(e);
                 document.getElementById('sys-status').innerText = "MAP LOAD FAILED";
@@ -185,10 +232,10 @@
         }
         loadTileset();
 
-        // 初始视角 (东京)
-        // 初始视角 (东京 - 垂直俯视，锁定球心)
+        // 初始视角 (上海)
+        // 初始视角 (上海 - 垂直俯视，锁定球心)
         // 使用 lookAt 锁定地球中心，确保旋转是围绕球心的
-        const initialPos = Cesium.Cartesian3.fromDegrees(139.6917, 35.6895, 20000000); // 20000km 高空，看全地球
+        const initialPos = Cesium.Cartesian3.fromDegrees(31.4737, 31.2304, 20000000); // 20000km 高空，看全地球
         viewer.camera.lookAt(Cesium.Cartesian3.ZERO, initialPos);
 
         // 辅助函数：计算捏合距离
@@ -218,6 +265,11 @@
         // 2.5 CUSTOM MOUSE CONTROLS (With Dynamic Sensitivity)
         // ==========================================================================================
 
+        const crosshair = document.getElementById('center-crosshair');
+        function setCrosshairVisible(visible) {
+            crosshair.style.opacity = visible ? '1' : '0';
+        }
+
         // 禁用默认的旋转 (Left Drag)
         viewer.scene.screenSpaceCameraController.enableRotate = false;
 
@@ -226,11 +278,26 @@
 
         handler.setInputAction(function (movement) {
             isMouseDragging = true;
+            setCrosshairVisible(true);
         }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
 
         handler.setInputAction(function (movement) {
             isMouseDragging = false;
+            setCrosshairVisible(false);
         }, Cesium.ScreenSpaceEventType.LEFT_UP);
+
+        // Also handle zoom start/end for mouse wheel if possible, but Cesium doesn't expose clean start/end events for wheel.
+        // We can use a timeout for wheel.
+        let wheelTimeout;
+        handler.setInputAction(function (movement) {
+            setCrosshairVisible(true);
+            clearTimeout(wheelTimeout);
+            wheelTimeout = setTimeout(() => {
+                if (!isMouseDragging && !isPinching) {
+                    setCrosshairVisible(false);
+                }
+            }, 500); // 500ms after last scroll, hide
+        }, Cesium.ScreenSpaceEventType.WHEEL);
 
         handler.setInputAction(function (movement) {
             if (isMouseDragging) {
@@ -282,6 +349,11 @@
             lastPinchDist = null;
             uiMode.innerText = statusText;
             uiMode.className = "";
+
+            // Should hide crosshair if not mouse dragging
+            if (!isMouseDragging) {
+                setCrosshairVisible(false);
+            }
         }
 
         // Single Hand Rotation Logic
@@ -289,6 +361,7 @@
             isPinching = true;
             uiMode.innerText = "GRABBING (PAN)";
             uiMode.className = "highlight";
+            setCrosshairVisible(true);
 
             const thumb = hand[4];
             const index = hand[8];
@@ -331,6 +404,7 @@
             uiMode.innerText = "ZOOMING (DUAL PINCH)";
             uiMode.className = "highlight";
             isPinching = true;
+            setCrosshairVisible(true);
             lastHandPos = null; // Reset rotation state
 
             // Calculate distance between centers of hands (using index 9: Middle Finger MCP)
