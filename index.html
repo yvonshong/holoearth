@@ -144,6 +144,29 @@
         });
 
         viewer.scene.globe.enableLighting = true;
+        viewer.scene.screenSpaceCameraController.minimumZoomDistance = 50; // 限制鼠标缩放最小高度 (与 onTick 保持一致)
+        viewer.scene.screenSpaceCameraController.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
+        viewer.scene.screenSpaceCameraController.zoomFactor = 1000.0; // 增大数值以大幅降低灵敏度 (移动距离 = 当前距离 / zoomFactor)
+
+        // 强行限制相机高度不低于地面 (防止穿模)
+        viewer.clock.onTick.addEventListener(function () {
+            const camera = viewer.camera;
+            const pos = camera.positionCartographic;
+            if (pos.height < 50) {
+                // 如果高度低于 50米，强制拉回 50米
+                const newPos = Cesium.Cartesian3.fromRadians(pos.longitude, pos.latitude, 50);
+
+
+                viewer.camera.setView({
+                    destination: newPos,
+                    orientation: {
+                        heading: camera.heading,
+                        pitch: camera.pitch,
+                        roll: camera.roll
+                    }
+                });
+            }
+        });
 
         // 加载 Google 3D Tiles
         async function loadTileset() {
@@ -188,8 +211,47 @@
             // 高空 (20000km) -> Ratio ~3 -> Speed ~10
             // 低空 (100m) -> Ratio ~1.5e-5 -> Speed ~Tiny
             // 这样保证了地面移动距离与手指移动距离大致成正比
-            return CONFIG.ROTATE_SPEED * (height * 0.6 / EARTH_RADIUS);
+            return CONFIG.ROTATE_SPEED * (height * 0.5 / EARTH_RADIUS);
         }
+
+        // ==========================================================================================
+        // 2.5 CUSTOM MOUSE CONTROLS (With Dynamic Sensitivity)
+        // ==========================================================================================
+
+        // 禁用默认的旋转 (Left Drag)
+        viewer.scene.screenSpaceCameraController.enableRotate = false;
+
+        const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+        let isMouseDragging = false;
+
+        handler.setInputAction(function (movement) {
+            isMouseDragging = true;
+        }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+
+        handler.setInputAction(function (movement) {
+            isMouseDragging = false;
+        }, Cesium.ScreenSpaceEventType.LEFT_UP);
+
+        handler.setInputAction(function (movement) {
+            if (isMouseDragging) {
+                const sensitivity = getDynamicSensitivity();
+
+                // Convert pixel delta to screen fraction (0.0 - 1.0)
+                // Note: Cesium 'movement' has startPosition and endPosition
+                const deltaX = (movement.endPosition.x - movement.startPosition.x) / viewer.canvas.clientWidth;
+                const deltaY = (movement.endPosition.y - movement.startPosition.y) / viewer.canvas.clientHeight;
+
+                // X-axis: Mouse right (deltaX > 0) -> Earth rotate right -> Camera rotate left
+                const rotateX = Math.abs(deltaX) * sensitivity;
+                if (deltaX > 0) viewer.camera.rotateLeft(rotateX);
+                else viewer.camera.rotateRight(rotateX);
+
+                // Y-axis: Mouse down (deltaY > 0) -> Earth rotate down -> Camera rotate down
+                const rotateY = Math.abs(deltaY) * sensitivity;
+                if (deltaY > 0) viewer.camera.rotateDown(rotateY);
+                else viewer.camera.rotateUp(rotateY);
+            }
+        }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
         // ==========================================================================================
         // 3. MEDIAPIPE LOGIC
