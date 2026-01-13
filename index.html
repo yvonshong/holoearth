@@ -188,7 +188,7 @@
             // 高空 (20000km) -> Ratio ~3 -> Speed ~10
             // 低空 (100m) -> Ratio ~1.5e-5 -> Speed ~Tiny
             // 这样保证了地面移动距离与手指移动距离大致成正比
-            return CONFIG.ROTATE_SPEED * (height / EARTH_RADIUS);
+            return CONFIG.ROTATE_SPEED * (height * 0.8 / EARTH_RADIUS);
         }
 
         // ==========================================================================================
