@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Atlas: Optimized Control</title>
+
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body,
+        html {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #cesiumContainer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* HUD Layer */
+        #output_canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            /* transform: scaleX(-1); REMOVED: Handled by MediaPipe selfieMode */
+        }
+
+        /* Status HUD */
+        #hud-status {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 20;
+            color: #0ff;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px;
+            border: 1px solid #0ff;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+
+        .status-line {
+            margin: 5px 0;
+            font-size: 14px;
+            text-shadow: 0 0 5px #0ff;
+        }
+
+        .highlight {
+            color: #ff0055;
+            font-weight: bold;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0ff;
+            font-size: 24px;
+            z-index: 30;
+            text-shadow: 0 0 10px #0ff;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        .input_video {
+            display: none;
+        }
+
+        .cesium-widget-credits {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <video class="input_video"></video>
+    <canvas id="output_canvas"></canvas>
+    <div id="cesiumContainer"></div>
+
+    <div id="hud-status">
+        <div class="status-line">SYSTEM: <span id="sys-status">INITIALIZING...</span></div>
+        <div class="status-line">MODE: <span id="mode-status">IDLE</span></div>
+        <div class="status-line">ALTITUDE: <span id="alt-status">Calculating...</span></div>
+        <div class="status-line" style="font-size: 10px; color: #aaa; margin-top: 10px;">
+            1 HAND PINCH = ROTATE<br>
+            2 HANDS = ZOOM
+        </div>
+    </div>
+
+    <div id="loading">Initializing Neural Link...<br><small>Please allow camera access</small></div>
+
+    <script>
+        // ==========================================================================================
+        // 1. SETUP & KEYS (FILL THESE IN!)
+        // ==========================================================================================
+
+        // ⚠️ 请在这里填入你的 Key
+        const GOOGLE_MAPS_API_KEY = 'YOUR_GOOGLE_KEY_HERE1';
+        Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIzOTRjMWZjNi04ZDViLTRkMzktYTU0Yy03YTg2YzhhMWI0NzAiLCJpZCI6Mzc3ODEzLCJpYXQiOjE3NjgyNTg0NjF9.w7XetoHHL8bzAWk5bIemKLlfpsRdWUcviM6xji1s5sE';
+
+        // 交互参数微调
+        const CONFIG = {
+            PINCH_THRESHOLD: 0.05,    // 捏合灵敏度 (0.0-1.0)
+            SMOOTHING: 0.15,          // 平滑系数
+            ROTATE_SPEED: 3.5,        // 旋转速度 (Radians per screen width)
+            ZOOM_SPEED: 5.0           // 缩放速度基数
+        };
+
+        // ==========================================================================================
+        // 2. CESIUM ENGINE
+        // ==========================================================================================
+
+        const viewer = new Cesium.Viewer('cesiumContainer', {
+            baseLayerPicker: false, geocoder: false, homeButton: false, infoBox: false,
+            navigationHelpButton: false, sceneModePicker: false, selectionIndicator: false,
+            timeline: false, animation: false, fullscreenButton: false, vrButton: false,
+            skyAtmosphere: new Cesium.SkyAtmosphere()
+        });
+
+        viewer.scene.globe.enableLighting = true;
+
+        // 加载 Google 3D Tiles
+        async function loadTileset() {
+            if (GOOGLE_MAPS_API_KEY === 'YOUR_GOOGLE_KEY_HERE') {
+                alert("请在代码中填入 Google Maps API Key 才能显示真实城市模型！");
+                return;
+            }
+            try {
+                Cesium.GoogleMaps.defaultApiKey = GOOGLE_MAPS_API_KEY;
+                const tileset = await Cesium.createGooglePhotorealistic3DTileset();
+                viewer.scene.primitives.add(tileset);
+            } catch (e) {
+                console.error(e);
+                document.getElementById('sys-status').innerText = "MAP LOAD FAILED";
+            }
+        }
+        loadTileset();
+
+        // 初始视角 (东京)
+        // 初始视角 (东京 - 垂直俯视，锁定球心)
+        // 使用 lookAt 锁定地球中心，确保旋转是围绕球心的
+        const initialPos = Cesium.Cartesian3.fromDegrees(139.6917, 35.6895, 20000000); // 20000km 高空，看全地球
+        viewer.camera.lookAt(Cesium.Cartesian3.ZERO, initialPos);
+
+        // 辅助函数：计算捏合距离
+        function calculatePinchDist(hand) {
+            const thumb = hand[4];
+            const index = hand[8];
+            return Math.hypot(thumb.x - index.x, thumb.y - index.y);
+        }
+
+        // 辅助函数：根据高度获取灵敏度 (对于旋转模式，其实主要是角度，高度影响较小，但保留接口)
+        // 辅助函数：根据高度获取灵敏度 (对于旋转模式，其实主要是角度，高度影响较小，但保留接口)
+        function getDynamicSensitivity() {
+            // 核心修正：缩放越近，需要的旋转角度越小才能达到“拖拽地面”的感觉
+            // 如果角度恒定，低空时地面移动速度会过快（瞬间飞过城市）
+            // 但用户反馈“旋转越小”，可能是因为没有正确 Orbit 导致原地打转
+            // 这里我们恢复高度缩放，确保 1:1 拖拽感
+            const height = viewer.camera.positionCartographic.height;
+            const EARTH_RADIUS = 6371000;
+            // 基础速度 * (高度 / 地球半径)
+            // 高空 (20000km) -> Ratio ~3 -> Speed ~10
+            // 低空 (100m) -> Ratio ~1.5e-5 -> Speed ~Tiny
+            // 这样保证了地面移动距离与手指移动距离大致成正比
+            return CONFIG.ROTATE_SPEED * (height / EARTH_RADIUS);
+        }
+
+        // ==========================================================================================
+        // 3. MEDIAPIPE LOGIC
+        // ==========================================================================================
+
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        // UI Elements
+        const uiSys = document.getElementById('sys-status');
+        const uiMode = document.getElementById('mode-status');
+        const uiAlt = document.getElementById('alt-status');
+        const uiLoad = document.getElementById('loading');
+
+        // State Variables
+        let lastHandPos = null;   // {x, y}
+        let lastPinchDist = null; // float
+        let isPinching = false;
+
+        // Smooth State
+        let smoothX = 0, smoothY = 0;
+
+        function onResults(results) {
+            uiLoad.style.display = 'none';
+            uiSys.innerText = "ONLINE";
+
+            // 更新高度显示
+            const height = viewer.camera.positionCartographic.height;
+            uiAlt.innerText = Math.round(height) + " m";
+
+            // 准备画布
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+
+                // 绘制骨骼
+                for (const landmarks of results.multiHandLandmarks) {
+                    // 简单判断该手是否捏合来决定颜色
+                    const dist = calculatePinchDist(landmarks);
+                    const color = (dist < CONFIG.PINCH_THRESHOLD) ? '#FF0055' : '#00FFFF';
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, { color: color, lineWidth: 2 });
+                    drawLandmarks(canvasCtx, landmarks, { color: '#FFFFFF', lineWidth: 1, radius: 3 });
+                }
+
+                const hands = results.multiHandLandmarks;
+
+                // --- 逻辑分支 ---
+
+                if (hands.length === 1) {
+                    // [ 单手模式：平移 ]
+                    const hand = hands[0];
+                    const pinchDist = calculatePinchDist(hand);
+
+                    if (pinchDist < CONFIG.PINCH_THRESHOLD) {
+                        isPinching = true;
+                        uiMode.innerText = "GRABBING (PAN)";
+                        uiMode.className = "highlight";
+
+                        // 捏合中心点
+                        const thumb = hand[4];
+                        const index = hand[8];
+                        const cx = (thumb.x + index.x) / 2;
+                        const cy = (thumb.y + index.y) / 2;
+
+                        // 平滑处理
+                        if (lastHandPos === null) {
+                            smoothX = cx; smoothY = cy;
+                        } else {
+                            smoothX = smoothX * (1 - CONFIG.SMOOTHING) + cx * CONFIG.SMOOTHING;
+                            smoothY = smoothY * (1 - CONFIG.SMOOTHING) + cy * CONFIG.SMOOTHING;
+                        }
+
+                        if (lastHandPos) {
+                            // 计算位移
+                            const deltaX = smoothX - lastHandPos.x;
+                            const deltaY = smoothY - lastHandPos.y;
+
+                            if (Math.hypot(deltaX, deltaY) > 0.001) {
+                                const sensitivity = getDynamicSensitivity();
+
+                                // 强制锁定球心，确保旋转是 Orbit 而不是 Yaw
+                                // 这解决了“无法旋转出画面边界”（原地打转）的问题
+                                // viewer.camera.lookAt(Cesium.Cartesian3.ZERO, viewer.camera.positionWC);
+
+                                // X轴移动 (左右拖动地球)
+                                // 手向右 (deltaX > 0) -> 地球向右转 -> 相机向左转 (rotateLeft)
+                                const rotateX = Math.abs(deltaX) * sensitivity;
+                                if (deltaX > 0) viewer.camera.rotateLeft(rotateX);
+                                else viewer.camera.rotateRight(rotateX);
+
+                                // Y轴移动 (上下拖动地球)
+                                // 手向下 (deltaY > 0) -> 地球向下转 -> 相机向上转 (rotateUp) -> 用户反馈反了 -> 改为 rotateDown
+                                const rotateY = Math.abs(deltaY) * sensitivity;
+                                if (deltaY > 0) viewer.camera.rotateDown(rotateY);
+                                else viewer.camera.rotateUp(rotateY);
+                            }
+                        }
+
+                        lastHandPos = { x: smoothX, y: smoothY };
+
+                    } else {
+                        // 松开手
+                        isPinching = false;
+                        lastHandPos = null;
+                        uiMode.innerText = "HOVERING";
+                        uiMode.className = "";
+                    }
+                    lastPinchDist = null;
+
+                } else if (hands.length === 2) {
+                    // [ 双手模式：缩放 ]
+                    // 必须双手都捏合才触发
+                    const h1 = hands[0];
+                    const h2 = hands[1];
+                    const p1 = calculatePinchDist(h1);
+                    const p2 = calculatePinchDist(h2);
+
+                    if (p1 < CONFIG.PINCH_THRESHOLD && p2 < CONFIG.PINCH_THRESHOLD) {
+                        uiMode.innerText = "ZOOMING (DUAL PINCH)";
+                        uiMode.className = "highlight";
+                        isPinching = true;
+
+                        // 计算两只手中心点的距离
+                        const c1 = h1[9];
+                        const c2 = h2[9];
+                        const currDist = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+
+                        if (lastPinchDist) {
+                            const delta = currDist - lastPinchDist;
+
+                            if (Math.abs(delta) > 0.002) {
+                                const zoomAmount = delta * viewer.camera.positionCartographic.height * CONFIG.ZOOM_SPEED;
+
+                                if (delta > 0) {
+                                    viewer.camera.zoomIn(zoomAmount);
+                                } else {
+                                    viewer.camera.zoomOut(Math.abs(zoomAmount));
+                                }
+                            }
+                        }
+                        lastPinchDist = currDist;
+                    } else {
+                        uiMode.innerText = "WAITING FOR DUAL PINCH";
+                        uiMode.className = "";
+                        lastPinchDist = null;
+                    }
+                    lastHandPos = null;
+                }
+
+            } else {
+                // 没有手
+                uiMode.innerText = "IDLE";
+                uiMode.className = "";
+                isPinching = false;
+                lastHandPos = null;
+                lastPinchDist = null;
+            }
+        }
+
+        // 初始化 MediaPipe
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({
+            selfieMode: true, // 开启自拍镜像模式
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({ image: videoElement }); },
+            width: 1280, height: 720
+        });
+        camera.start();
+    </script>
+</body>
+
+</html>
